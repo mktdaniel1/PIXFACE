@@ -1,9 +1,6 @@
 // src/orquestrador.js
-// Cérebro do loop (variante Slack). Chame aoReceberMensagem() do seu webhook 2chat,
-// com o remetente já normalizado (você resolve isso no Pulso via extrairRemetente).
-//
-// Fluxo: identifica cliente → Claude extrai o valor → se confiança alta, enfileira
-// a geração (resultado vai pro Slack); se ambíguo, escala pra CS no Slack.
+// Cérebro do loop (variante Slack). Agora com LOG em cada passo e escalação no Slack
+// em qualquer beco sem saída — nada mais sai calado.
 
 import { extrairAporte } from './extrair.js';
 import { enfileirar } from './fila.js';
@@ -14,16 +11,26 @@ import { grossUp } from './imposto.js';
 const CONFIANCA_MIN = 0.6;
 
 export async function aoReceberMensagem({ remetente, texto }) {
+  console.log('[orq] recebido:', { remetente, texto });
+
   const conta = await clientePorRemetente(remetente);
-  if (!conta) return; // remetente não mapeado → ignora
+  if (!conta) {
+    console.warn('[orq] conta não encontrada para', remetente);
+    return escalarParaCs({ remetente, motivo: `Remetente ${remetente} não está no clientes.js` });
+  }
+  console.log('[orq] conta:', conta.nome, conta.adAccountId);
 
-  const { ehAporte, valor, confianca } = await extrairAporte(texto);
-  if (!ehAporte || !valor) return; // não é aporte → segue o fluxo normal do Pulso
+  const r = await extrairAporte(texto);
+  console.log('[orq] extração:', r);
 
-  if (confianca < CONFIANCA_MIN) {
-    return escalarParaCs({ remetente, conta, texto, motivo: 'valor ambíguo — confirmar manualmente' });
+  if (!r.ehAporte || !r.valor) {
+    return escalarParaCs({ remetente, conta, motivo: `Não identifiquei um valor em: "${texto}"` });
+  }
+  if (r.confianca < CONFIANCA_MIN) {
+    return escalarParaCs({ remetente, conta, motivo: `Valor ambíguo: ${r.valor} (confiança ${r.confianca})` });
   }
 
-  // grossUp embute o imposto pra sobrar o líquido p/ mídia. Troque por `valor` se cobra o bruto.
-  enfileirar({ remetente, conta, valorBruto: grossUp(valor) });
+  const valorBruto = grossUp(r.valor); // troque por r.valor se a planilha já traz o bruto
+  console.log('[orq] enfileirando geração:', conta.adAccountId, valorBruto);
+  enfileirar({ remetente, conta, valorBruto });
 }
