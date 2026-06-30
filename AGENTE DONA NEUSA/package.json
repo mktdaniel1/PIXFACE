@@ -1,0 +1,15 @@
+{
+  "name": "pixface",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "sessao": "node salvarSessao.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "express": "^4.19.2",
+    "playwright": "^1.45.0",
+    "qrcode": "^1.5.4"
+  }
+}
