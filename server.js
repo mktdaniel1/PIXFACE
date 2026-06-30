@@ -4,9 +4,29 @@ import './bootstrapSessao.js';
 
 import express from 'express';
 import { aoReceberMensagem } from './orquestrador.js';
+import { enfileirar } from './fila.js';
 
 const app = express();
 app.use(express.json());
+
+// Geração DIRETA: a CS manda conta + valor. Sem telefone, sem clientes.js.
+// O resultado (Pix ou erro) cai no Slack. Use o valor que vai entrar na Meta (bruto).
+app.post('/gerar', (req, res) => {
+  const { adAccountId, businessId, nome = 'Conta', valor } = req.body ?? {};
+  if (!adAccountId || !businessId) {
+    return res.status(400).json({ ok: false, erro: 'Informe adAccountId e businessId.' });
+  }
+  if (!(valor > 0)) {
+    return res.status(400).json({ ok: false, erro: 'Valor inválido.' });
+  }
+  // remetente único por chamada → evita o dedup bloquear testes repetidos.
+  enfileirar({
+    remetente: `CS-${Date.now()}`,
+    conta: { nome, businessId, adAccountId },
+    valorBruto: Number(valor),
+  });
+  res.json({ ok: true, mensagem: `Gerando Pix de R$ ${Number(valor).toFixed(2)} para ${nome}. O resultado vai pro Slack.` });
+});
 
 // Webhook do 2chat. Ajuste a extração ao payload real (você já faz no Pulso).
 app.post('/webhook/2chat', (req, res) => {
