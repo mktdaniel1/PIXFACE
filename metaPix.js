@@ -31,9 +31,13 @@ export async function gerarPixMeta({ businessId, adAccountId, valorBruto, headle
       throw new Error('Sessão expirada/checkpoint (provável bloqueio pelo IP do Railway). Rode local ou via proxy residencial.');
     }
 
-    // 1) Abre o modal "Adicionar fundos"
-    await page.getByRole('button', { name: /adicionar fundos/i }).first().click();
-    await page.getByText(/escolha o valor/i).waitFor({ timeout: 15000 });
+    // 1) Acha e abre "Adicionar fundos" (a página da Meta carrega em partes;
+    //    procura o botão por vários nomes, com tempo generoso, e rola até ele)
+    const botaoFundos = page.getByRole('button', { name: /adicionar (fundos|dinheiro|saldo)/i }).first();
+    await botaoFundos.waitFor({ state: 'visible', timeout: 60000 });
+    await botaoFundos.scrollIntoViewIfNeeded().catch(() => {});
+    await botaoFundos.click();
+    await page.getByText(/escolha o valor/i).waitFor({ timeout: 20000 });
 
     // 2) Valor customizado
     await page.getByRole('button', { name: /^outra$/i }).click().catch(() => {});
