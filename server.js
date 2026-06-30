@@ -26,9 +26,17 @@ app.post('/webhook/2chat', (req, res) => {
 // Teste manual: simula um cliente, pra validar Meta+Slack antes de plugar o 2chat.
 app.post('/test', async (req, res) => {
   const { remetente = '5511999990000', texto = 'quero investir 500' } = req.body ?? {};
-  await aoReceberMensagem({ remetente, texto });
-  res.json({ ok: true });
+  try {
+    await aoReceberMensagem({ remetente, texto });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('test erro', e);
+    res.status(200).json({ ok: false, erro: String(e?.message ?? e) });
+  }
 });
+
+// Evita que qualquer erro não tratado derrube o container.
+process.on('unhandledRejection', (e) => console.error('unhandledRejection', e));
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
