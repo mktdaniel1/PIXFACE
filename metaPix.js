@@ -1,70 +1,82 @@
-// src/metaPix.js
-// Camada RPA: dirige o Ads Manager e captura APENAS o copia-e-cola gerado pela Meta.
-// O QR é renderizado depois, localmente, a partir desse código (ver qr.js).
-//
-// IMPORTANTE: os seletores abaixo são ponto de partida. A UI do Meta muda com
-// frequência e tem testes A/B — valide/ajuste contra o DOM real (rode headless:false
-// na 1a vez para inspecionar). Faça o agent FALHAR ALTO se não achar o código.
+// metaPix.js — gera o Pix pré-pago na Meta e captura o copia-e-cola.
+// Fluxo REAL (confirmado na UI de 2026):
+//   billing hub → "Adicionar fundos" → "Outra" + Valor + PIX → "Avançar"
+//   → redireciona pra facebook.dlocal.com → "Copie código" (copia-e-cola no clipboard)
 
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 
 const SESSION_PATH = process.env.META_SESSION_PATH || './session/meta.json';
 
-/**
- * Gera (NÃO paga) um Pix de aporte pré-pago e devolve o copia-e-cola.
- * @returns {Promise<{copiaECola:string, valorSolicitado:number, screenshot:string}>}
- */
-export async function gerarPixMeta({ businessId, adAccountId, valorBruto }) {
+export async function gerarPixMeta({ businessId, adAccountId, valorBruto, headless = true }) {
   if (!fs.existsSync(SESSION_PATH)) {
     throw new Error(`Sessão ausente em ${SESSION_PATH}. Rode "node salvarSessao.js" uma vez.`);
   }
+  const assetId = String(adAccountId).replace(/^act_/, ''); // billing hub usa o número puro
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless, slowMo: headless ? 0 : 300 });
   const context = await browser.newContext({
     storageState: SESSION_PATH,
     locale: 'pt-BR',
     timezoneId: 'America/Sao_Paulo',
+    permissions: ['clipboard-read', 'clipboard-write'],
   });
   const page = await context.newPage();
 
   try {
-    // 1) Central de cobrança da conta específica
-    const url = `https://business.facebook.com/billing_hub/accounts/details?asset_id=${adAccountId}&business_id=${businessId}`;
-    await page.goto(url, { waitUntil: 'networkidle' });
-
-    // Sessão expirada/checkpoint → falha alto (não tenta logar sozinho)
+    const url = `https://business.facebook.com/billing_hub/accounts/details?asset_id=${assetId}&business_id=${businessId}`;
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(4000);
     if (/login|checkpoint/.test(page.url())) {
-      throw new Error('Sessão expirada/checkpoint. Rode salvarSessao.js de novo.');
+      throw new Error('Sessão expirada/checkpoint (provável bloqueio pelo IP do Railway). Rode local ou via proxy residencial.');
     }
 
-    // 2) "Adicionar fundos" / "Adicionar dinheiro" (varia PT/EN e por A/B test)
-    await page.getByRole('button', { name: /adicionar (fundos|dinheiro)/i }).click();
+    // 1) Abre o modal "Adicionar fundos"
+    await page.getByRole('button', { name: /adicionar fundos/i }).first().click();
+    await page.getByText(/escolha o valor/i).waitFor({ timeout: 15000 });
 
-    // 3) Valor
-    await page.getByLabel(/valor|quantia/i).fill(String(valorBruto));
+    // 2) Valor customizado
+    await page.getByRole('button', { name: /^outra$/i }).click().catch(() => {});
+    const inteiro = Number.isInteger(Number(valorBruto));
+    const valorFmt = inteiro ? String(valorBruto) : Number(valorBruto).toFixed(2).replace('.', ',');
+    await page.getByLabel(/valor/i).first().fill(valorFmt);
 
-    // 4) Pix como forma de pagamento
-    await page.getByText(/pix/i).first().click();
+    // 3) Garante Pix marcado
+    await page.getByText(/^PIX$/).first().click().catch(() => {});
 
-    // 5) Confirma a EMISSÃO da cobrança (gera o Pix — não paga)
-    await page.getByRole('button', { name: /(gerar|continuar|adicionar)/i }).click();
+    // 4) Avançar → redireciona pra dlocal
+    await page.getByRole('button', { name: /avançar/i }).click();
+    await page.waitForURL(/dlocal\.com/i, { timeout: 40000 });
 
-    // 6) Captura o copia-e-cola (EMV do Pix começa com "00020126...")
-    const copiaECola = await page
-      .locator('[data-testid="pix-copy-paste"], textarea[readonly], input[readonly]')
-      .first()
-      .inputValue()
-      .catch(() => page.getByText(/^00020126/).first().innerText());
+    // 5) Espera a tela do Pix e captura o copia-e-cola
+    await page.getByRole('button', { name: /copie código/i }).waitFor({ timeout: 25000 });
 
-    if (!copiaECola || !/^000201/.test(copiaECola.trim())) {
-      throw new Error('Não encontrei o copia-e-cola na tela. Reveja os seletores.');
+    let copiaECola = await lerCodigoDoDom(page);
+    if (!ehPix(copiaECola)) {
+      await page.getByRole('button', { name: /copie código/i }).click();
+      await page.waitForTimeout(700);
+      copiaECola = await page.evaluate(() => navigator.clipboard.readText()).catch(() => null);
+    }
+    if (!ehPix(copiaECola)) {
+      throw new Error('Cheguei na tela do Pix (dlocal) mas não consegui capturar o copia-e-cola.');
     }
 
-    const screenshot = (await page.screenshot()).toString('base64'); // auditoria
+    const screenshot = (await page.screenshot()).toString('base64');
     return { copiaECola: copiaECola.trim(), valorSolicitado: valorBruto, screenshot };
   } finally {
     await context.close();
     await browser.close();
   }
+}
+
+const ehPix = (s) => typeof s === 'string' && /^000201/.test(s.trim());
+
+async function lerCodigoDoDom(page) {
+  return page.evaluate(() => {
+    const vals = [...document.querySelectorAll('input,textarea')].map((e) => e.value);
+    const fromInput = vals.find((v) => v && /^000201/.test(v));
+    if (fromInput) return fromInput;
+    const m = document.body.innerText.match(/000201[0-9A-Za-z+/=.\-]{20,}/);
+    return m ? m[0] : null;
+  });
 }
